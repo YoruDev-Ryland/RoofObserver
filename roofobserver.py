@@ -244,10 +244,23 @@ def poll_daily(conn: sqlite3.Connection, weather_dir: Path, source_timezone: str
 def run_poll_cycle(conn: sqlite3.Connection, config: dict[str, object]) -> dict[str, int]:
     source_timezone = str(config["source_timezone"])
     stats = {
-        "roof_events": poll_roofs(conn, Path(config["roof_dir"]), source_timezone),
-        "weather_snapshots": poll_weatherdata(conn, Path(config["weather_dir"]), source_timezone),
-        "daily_weather": poll_daily(conn, Path(config["weather_dir"]), source_timezone),
+        "roof_events": 0,
+        "weather_snapshots": 0,
+        "daily_weather": 0,
     }
+
+    collectors = {
+        "roof_events": lambda: poll_roofs(conn, Path(config["roof_dir"]), source_timezone),
+        "weather_snapshots": lambda: poll_weatherdata(conn, Path(config["weather_dir"]), source_timezone),
+        "daily_weather": lambda: poll_daily(conn, Path(config["weather_dir"]), source_timezone),
+    }
+
+    for name, collector in collectors.items():
+        try:
+            stats[name] = collector()
+        except Exception:
+            logging.exception("poll collector failed: %s", name)
+
     conn.commit()
     return stats
 

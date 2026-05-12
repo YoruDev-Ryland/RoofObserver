@@ -286,6 +286,9 @@ begin
 	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' Start SERVICE_AUTO_START', 'Configuring autostart for ' + ServiceName);
 	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppExit Default Restart', 'Configuring restart behavior for ' + ServiceName);
 	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppRestartDelay 5000', 'Configuring restart delay for ' + ServiceName);
+	EnsureExecHidden(ExpandConstant('{cmd}'), '/C sc.exe config "' + ServiceName + '" start= delayed-auto', 'Configuring delayed autostart for ' + ServiceName);
+	EnsureExecHidden(ExpandConstant('{cmd}'), '/C sc.exe failure "' + ServiceName + '" reset= 86400 actions= restart/5000/restart/15000/restart/30000', 'Configuring Windows failure actions for ' + ServiceName);
+	EnsureExecHidden(ExpandConstant('{cmd}'), '/C sc.exe failureflag "' + ServiceName + '" 1', 'Enabling Windows failure actions for ' + ServiceName);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
