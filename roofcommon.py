@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DAILY_SEPARATOR = "_______________________"
@@ -55,7 +55,12 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
         )
 
     source_timezone = data.get("source_timezone", "America/Chicago")
-    ZoneInfo(source_timezone)
+    try:
+        ZoneInfo(source_timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            f"Time zone data for '{source_timezone}' is unavailable. Install the tzdata package or rebuild the Windows executable with tzdata bundled."
+        ) from exc
 
     config_dir = path.parent
     db_path = resolve_path(data["db_path"], config_dir)

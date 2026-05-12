@@ -103,8 +103,8 @@ jobs:
 
       - name: Build executables with PyInstaller
         run: |
-          pyinstaller --onefile --name roofobserver roofobserver.py
-          pyinstaller --onefile --name roofapi roofapi.py
+          pyinstaller --onefile --collect-all tzdata --name roofobserver roofobserver.py
+          pyinstaller --onefile --collect-all tzdata --name roofapi roofapi.py
 
       - name: Build installer with Inno Setup
         run: iscc installer.iss

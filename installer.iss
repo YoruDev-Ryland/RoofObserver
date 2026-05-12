@@ -5,6 +5,7 @@
 AppName=RoofObserver
 AppVersion=1.0
 AppPublisher=YoruDev
+ArchitecturesInstallIn64BitMode=x64compatible
 DefaultDirName={autopf}\RoofObserver
 DefaultGroupName=RoofObserver
 OutputDir=Output
@@ -29,14 +30,44 @@ Filename: "{app}\nssm.exe"; Parameters: "stop RoofAPI"; Flags: runhidden
 Filename: "{app}\nssm.exe"; Parameters: "remove RoofAPI confirm"; Flags: runhidden
 
 [Code]
+function InstallerServiceLogPath(): string;
+begin
+	Result := ExpandConstant('{app}\installer-service-setup.log');
+end;
+
+procedure AppendInstallerLog(const Message: string);
+begin
+	Log(Message);
+	SaveStringToFile(InstallerServiceLogPath(), GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0) + ' ' + Message + #13#10, True);
+end;
+
 function ExecHidden(const FileName: string; const Params: string): Integer;
 var
 	ResultCode: Integer;
 begin
+	AppendInstallerLog('EXEC ' + FileName + ' ' + Params);
 	if Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+	begin
+		AppendInstallerLog('EXIT ' + IntToStr(ResultCode));
 		Result := ResultCode
+	end
 	else
+	begin
+		AppendInstallerLog('EXEC FAILED');
 		Result := -1;
+	end;
+end;
+
+procedure EnsureExecHidden(const FileName: string; const Params: string; const FriendlyName: string);
+var
+	ResultCode: Integer;
+begin
+	ResultCode := ExecHidden(FileName, Params);
+	if ResultCode <> 0 then
+	begin
+		AppendInstallerLog('FAIL ' + FriendlyName + ' (exit code ' + IntToStr(ResultCode) + ')');
+		RaiseException(FriendlyName + ' failed. See ' + InstallerServiceLogPath());
+	end;
 end;
 
 function ServiceExists(const ServiceName: string): Boolean;
@@ -50,10 +81,14 @@ var
 begin
 	NssmPath := ExpandConstant('{app}\nssm.exe');
 	if not ServiceExists(ServiceName) then
+	begin
+		AppendInstallerLog('SKIP remove missing service ' + ServiceName);
 		exit;
+	end;
 
+	AppendInstallerLog('Removing existing service ' + ServiceName);
 	ExecHidden(NssmPath, 'stop ' + ServiceName);
-	ExecHidden(NssmPath, 'remove ' + ServiceName + ' confirm');
+	EnsureExecHidden(NssmPath, 'remove ' + ServiceName + ' confirm', 'Removing service ' + ServiceName);
 end;
 
 procedure InstallAndConfigureService(const ServiceName: string; const ExeName: string; const LogName: string);
@@ -64,13 +99,14 @@ begin
 	NssmPath := ExpandConstant('{app}\nssm.exe');
 	AppPath := ExpandConstant('{app}');
 
-	ExecHidden(NssmPath, 'install ' + ServiceName + ' "' + AppPath + '\' + ExeName + '"');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' AppDirectory "' + AppPath + '"');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' AppStdout "' + AppPath + '\' + LogName + '"');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' AppStderr "' + AppPath + '\' + LogName + '"');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' Start SERVICE_AUTO_START');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' AppExit Default Restart');
-	ExecHidden(NssmPath, 'set ' + ServiceName + ' AppRestartDelay 5000');
+	AppendInstallerLog('Installing service ' + ServiceName + ' from ' + AppPath + '\' + ExeName);
+	EnsureExecHidden(NssmPath, 'install ' + ServiceName + ' "' + AppPath + '\' + ExeName + '"', 'Installing service ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppDirectory "' + AppPath + '"', 'Configuring AppDirectory for ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppStdout "' + AppPath + '\' + LogName + '"', 'Configuring stdout log for ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppStderr "' + AppPath + '\' + LogName + '"', 'Configuring stderr log for ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' Start SERVICE_AUTO_START', 'Configuring autostart for ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppExit Default Restart', 'Configuring restart behavior for ' + ServiceName);
+	EnsureExecHidden(NssmPath, 'set ' + ServiceName + ' AppRestartDelay 5000', 'Configuring restart delay for ' + ServiceName);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -87,10 +123,13 @@ begin
 	if CurStep <> ssPostInstall then
 		exit;
 
+	AppendInstallerLog('Starting post-install service configuration');
+
 	InstallAndConfigureService('RoofObserver', 'roofobserver.exe', 'roofobserver.log');
 	InstallAndConfigureService('RoofAPI', 'roofapi.exe', 'roofapi.log');
 
 	NssmPath := ExpandConstant('{app}\nssm.exe');
-	ExecHidden(NssmPath, 'start RoofObserver');
-	ExecHidden(NssmPath, 'start RoofAPI');
+	EnsureExecHidden(NssmPath, 'start RoofObserver', 'Starting service RoofObserver');
+	EnsureExecHidden(NssmPath, 'start RoofAPI', 'Starting service RoofAPI');
+	AppendInstallerLog('Service configuration completed successfully');
 end;
