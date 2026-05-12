@@ -4,6 +4,7 @@ import argparse
 import logging
 import socket
 import sqlite3
+import sys
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -55,6 +56,13 @@ def ensure_port_available(host: str, port: int) -> None:
 def create_app(config: dict[str, object]) -> Flask:
     app = Flask(__name__)
     db_path = Path(config["db_path"])
+
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
 
     @app.errorhandler(ValueError)
     def handle_value_error(error: ValueError):

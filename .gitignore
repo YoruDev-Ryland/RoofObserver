@@ -32,6 +32,7 @@ nssm.zip
 
 # Local sample data — not committed, used for dev testing only
 SFROShare/
+local-dashboard/
 
 # VS Code
 .vscode/
