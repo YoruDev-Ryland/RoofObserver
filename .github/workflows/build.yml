@@ -1,0 +1,42 @@
+name: Build Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install flask waitress pyinstaller
+
+      - name: Download NSSM
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://nssm.cc/release/nssm-2.24.zip -OutFile nssm.zip
+          Expand-Archive nssm.zip -DestinationPath nssm_tmp
+          Copy-Item nssm_tmp\nssm-2.24\win64\nssm.exe .\nssm.exe
+
+      - name: Build executables with PyInstaller
+        run: |
+          pyinstaller --onefile --name roofobserver roofobserver.py
+          pyinstaller --onefile --name roofapi roofapi.py
+
+      - name: Build installer with Inno Setup
+        run: iscc installer.iss
+
+      - name: Upload installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/RoofObserverSetup.exe

@@ -1,0 +1,10 @@
+{
+  "share_root": "Z:\\",
+  "roof_subdir": "roof",
+  "weather_subdir": "weather",
+  "db_path": "C:\\RoofObserver\\roofobserver.db",
+  "poll_interval_seconds": 30,
+  "log_path": "C:\\RoofObserver\\roofobserver.log",
+  "api_host": "0.0.0.0",
+  "api_port": 5000
+}

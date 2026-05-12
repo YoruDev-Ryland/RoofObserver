@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Database (generated at runtime)
+*.db
+*.db-shm
+*.db-wal
+
+# Logs (generated at runtime)
+*.log
+
+# Installer output
+Output/
+
+# NSSM binary (downloaded by CI)
+nssm.exe
+nssm_tmp/
+nssm.zip
+
+# Local sample data — not committed, used for dev testing only
+SFROShare/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
