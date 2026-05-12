@@ -167,6 +167,46 @@ begin
 	Result := ExecHidden(ExpandConstant('{cmd}'), '/C sc query "' + ServiceName + '" >NUL 2>&1') = 0;
 end;
 
+function ServiceStateMatches(const ServiceName: string; const StateText: string): Boolean;
+begin
+	Result := ExecHidden(
+		ExpandConstant('{cmd}'),
+		'/C sc query "' + ServiceName + '" | find /I "' + StateText + '" >NUL 2>&1'
+	) = 0;
+end;
+
+function ServiceIsRunningOrPending(const ServiceName: string): Boolean;
+begin
+	Result := ServiceStateMatches(ServiceName, 'RUNNING') or ServiceStateMatches(ServiceName, 'START_PENDING');
+end;
+
+procedure StartServiceAndConfirm(const ServiceName: string);
+var
+	NssmPath: string;
+	ResultCode: Integer;
+	Attempt: Integer;
+begin
+	NssmPath := ExpandConstant('{app}\nssm.exe');
+	ResultCode := ExecHidden(NssmPath, 'start ' + ServiceName);
+	if ResultCode <> 0 then
+		AppendInstallerLog('WARN nssm start returned exit code ' + IntToStr(ResultCode) + ' for ' + ServiceName + '; checking service state');
+
+	for Attempt := 1 to 15 do
+	begin
+		if ServiceIsRunningOrPending(ServiceName) then
+		begin
+			AppendInstallerLog('CONFIRMED service state acceptable for ' + ServiceName + ' on attempt ' + IntToStr(Attempt));
+			exit;
+		end;
+
+		AppendInstallerLog('WAIT service not yet running for ' + ServiceName + ' (attempt ' + IntToStr(Attempt) + ')');
+		Sleep(1000);
+	end;
+
+	AppendInstallerLog('FAIL service did not reach RUNNING or START_PENDING state: ' + ServiceName);
+	RaiseException('Starting service ' + ServiceName + ' failed. See ' + InstallerServiceLogPath());
+end;
+
 procedure InitializeWizard;
 begin
 	ConfigShareRootPlaceholder := '\\\\YOUR-SHARE-HOST\\SFROShare';
@@ -256,8 +296,6 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-	NssmPath: string;
 begin
 	if CurStep <> ssPostInstall then
 		exit;
@@ -271,8 +309,7 @@ begin
 	InstallAndConfigureService('RoofObserver', 'roofobserver.exe', 'roofobserver.log');
 	InstallAndConfigureService('RoofAPI', 'roofapi.exe', 'roofapi.log');
 
-	NssmPath := ExpandConstant('{app}\nssm.exe');
-	EnsureExecHidden(NssmPath, 'start RoofObserver', 'Starting service RoofObserver');
-	EnsureExecHidden(NssmPath, 'start RoofAPI', 'Starting service RoofAPI');
+	StartServiceAndConfirm('RoofObserver');
+	StartServiceAndConfirm('RoofAPI');
 	AppendInstallerLog('Service configuration completed successfully');
 end;
