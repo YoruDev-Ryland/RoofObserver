@@ -30,15 +30,92 @@ Filename: "{app}\nssm.exe"; Parameters: "stop RoofAPI"; Flags: runhidden
 Filename: "{app}\nssm.exe"; Parameters: "remove RoofAPI confirm"; Flags: runhidden
 
 [Code]
+var
+	RoofFilePage: TInputFileWizardPage;
+	ConfiguredShareRoot: string;
+	ConfigShareRootPlaceholder: string;
+
 function InstallerServiceLogPath(): string;
 begin
 	Result := ExpandConstant('{app}\installer-service-setup.log');
+end;
+
+function InstalledConfigPath(): string;
+begin
+	Result := ExpandConstant('{app}\config.json');
 end;
 
 procedure AppendInstallerLog(const Message: string);
 begin
 	Log(Message);
 	SaveStringToFile(InstallerServiceLogPath(), GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0) + ' ' + Message + #13#10, True);
+end;
+
+function NormalizeSlashes(const Value: string): string;
+begin
+	Result := StringChangeEx(Value, '/', '\', True);
+end;
+
+function JsonEscapeBackslashes(const Value: string): string;
+begin
+	Result := StringChangeEx(Value, '\', '\\', True);
+end;
+
+function DeriveShareRootFromRoofFile(const RoofFilePath: string; var ShareRoot: string): Boolean;
+var
+	NormalizedPath: string;
+	LowerPath: string;
+	MarkerPos: Integer;
+begin
+	Result := False;
+	NormalizedPath := NormalizeSlashes(Trim(RoofFilePath));
+	if CompareText(ExtractFileName(NormalizedPath), 'RoofStatusFile.txt') <> 0 then
+		exit;
+
+	LowerPath := Lowercase(NormalizedPath);
+	MarkerPos := Pos('\roof\', LowerPath);
+	if MarkerPos <= 1 then
+		exit;
+
+	ShareRoot := Copy(NormalizedPath, 1, MarkerPos - 1);
+	if ShareRoot = '' then
+		exit;
+
+	Result := True;
+end;
+
+function ConfigHasPlaceholderOrMissing(): Boolean;
+var
+	Contents: string;
+begin
+	if not FileExists(InstalledConfigPath()) then
+	begin
+		Result := True;
+		exit;
+	end;
+
+	LoadStringFromFile(InstalledConfigPath(), Contents);
+	Result := Pos(ConfigShareRootPlaceholder, Contents) > 0;
+end;
+
+procedure UpdateInstalledConfigShareRoot(const ShareRoot: string);
+var
+	Contents: string;
+	EscapedShareRoot: string;
+begin
+	if not LoadStringFromFile(InstalledConfigPath(), Contents) then
+		RaiseException('Unable to read ' + InstalledConfigPath());
+
+	EscapedShareRoot := JsonEscapeBackslashes(ShareRoot);
+	if Pos(ConfigShareRootPlaceholder, Contents) > 0 then
+		Contents := StringChangeEx(Contents, ConfigShareRootPlaceholder, EscapedShareRoot, True)
+	else
+		RaiseException('config.json no longer contains the expected share_root placeholder. Edit config.json manually.');
+
+	if not SaveStringToFile(InstalledConfigPath(), Contents, False) then
+		RaiseException('Unable to write ' + InstalledConfigPath());
+
+	AppendInstallerLog('Configured share_root=' + ShareRoot);
 end;
 
 function ExecHidden(const FileName: string; const Params: string): Integer;
@@ -73,6 +150,53 @@ end;
 function ServiceExists(const ServiceName: string): Boolean;
 begin
 	Result := ExecHidden(ExpandConstant('{cmd}'), '/C sc query "' + ServiceName + '" >NUL 2>&1') = 0;
+end;
+
+procedure InitializeWizard;
+begin
+	ConfigShareRootPlaceholder := '\\\\YOUR-SHARE-HOST\\SFROShare';
+	RoofFilePage := CreateInputFilePage(
+		wpSelectDir,
+		'Observatory Share Location',
+		'Select one real roof status file from the observatory share.',
+		'Browse to a file like \\server\share\roof\building-2\RoofStatusFile.txt. The installer will derive the share root automatically.'
+	);
+	RoofFilePage.Add('&Roof status file:', 'Roof status file|RoofStatusFile.txt|Text files|*.txt|All files|*.*', '.txt');
+	ConfiguredShareRoot := '';
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+	Result := False;
+	if (RoofFilePage <> nil) and (PageID = RoofFilePage.ID) then
+		Result := not ConfigHasPlaceholderOrMissing();
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+	ShareRoot: string;
+begin
+	Result := True;
+	if (RoofFilePage = nil) or (CurPageID <> RoofFilePage.ID) then
+		exit;
+
+	if Trim(RoofFilePage.Values[0]) = '' then
+	begin
+		MsgBox('Select a RoofStatusFile.txt from your observatory share so the installer can configure share_root correctly.', mbError, MB_OK);
+		Result := False;
+		exit;
+	end;
+
+	if not DeriveShareRootFromRoofFile(RoofFilePage.Values[0], ShareRoot) then
+	begin
+		MsgBox('The selected file must be a RoofStatusFile.txt located under a \\server\share\roof\building-* path.', mbError, MB_OK);
+		Result := False;
+		exit;
+	end;
+
+	ConfiguredShareRoot := ShareRoot;
+	AppendInstallerLog('User selected roof file ' + RoofFilePage.Values[0]);
+	AppendInstallerLog('Derived share root ' + ConfiguredShareRoot);
 end;
 
 procedure StopAndRemoveService(const ServiceName: string);
@@ -124,6 +248,10 @@ begin
 		exit;
 
 	AppendInstallerLog('Starting post-install service configuration');
+	if ConfiguredShareRoot <> '' then
+		UpdateInstalledConfigShareRoot(ConfiguredShareRoot)
+	else if ConfigHasPlaceholderOrMissing() then
+		RaiseException('share_root is still unconfigured. Re-run the installer and select a RoofStatusFile.txt file.');
 
 	InstallAndConfigureService('RoofObserver', 'roofobserver.exe', 'roofobserver.log');
 	InstallAndConfigureService('RoofAPI', 'roofapi.exe', 'roofapi.log');

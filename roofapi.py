@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import socket
 import sqlite3
 from pathlib import Path
 
 from flask import Flask, jsonify, request
 
-from roofcommon import load_config, setup_logging, sqlite_readonly_uri
+from roofcommon import load_config, log_bootstrap_exception, setup_logging, sqlite_readonly_uri
 
 
 def get_db(db_path: Path) -> sqlite3.Connection:
@@ -38,6 +39,17 @@ def build_where(clauses: list[str], params: list[object]) -> tuple[str, tuple[ob
     if not clauses:
         return "", tuple(params)
     return f" WHERE {' AND '.join(clauses)}", tuple(params)
+
+
+def ensure_port_available(host: str, port: int) -> None:
+    bind_host = host if host not in {"0.0.0.0", "::"} else ""
+    family = socket.AF_INET6 if ":" in host and host not in {"0.0.0.0", "::"} else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((bind_host, port))
+        except OSError as exc:
+            raise RuntimeError(f"API port {port} on host '{host}' is unavailable: {exc}") from exc
 
 
 def create_app(config: dict[str, object]) -> Flask:
@@ -161,25 +173,35 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
-    config = load_config(args.config)
-    api_log_path = str(config["log_path"]).replace("roofobserver", "roofapi")
-    setup_logging(api_log_path, name="roofapi")
-    app = create_app(config)
-
-    host = str(config["api_host"])
-    port = int(config["api_port"])
-    logging.info("RoofAPI starting on %s:%s", host, port)
-
     try:
-        from waitress import serve
-    except ImportError:
-        logging.warning("waitress is not installed; falling back to Flask development server")
-        app.run(host=host, port=port)
-        return 0
+        args = parse_args()
+        config = load_config(args.config)
+        api_log_path = str(config["log_path"]).replace("roofobserver", "roofapi")
+        setup_logging(api_log_path, name="roofapi")
+        app = create_app(config)
 
-    serve(app, host=host, port=port)
-    return 0
+        host = str(config["api_host"])
+        port = int(config["api_port"])
+        ensure_port_available(host, port)
+        logging.info("RoofAPI starting on %s:%s", host, port)
+
+        try:
+            from waitress import serve
+        except ImportError:
+            logging.warning("waitress is not installed; falling back to Flask development server")
+            app.run(host=host, port=port)
+            return 0
+
+        serve(app, host=host, port=port)
+        return 0
+    except Exception as exc:
+        bootstrap_path = log_bootstrap_exception("roofapi", exc)
+        try:
+            logging.exception("RoofAPI fatal startup error")
+        except Exception:
+            pass
+        print(f"RoofAPI fatal startup error. See {bootstrap_path}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

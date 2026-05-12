@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from roofcommon import (
     get_meta,
     init_db,
     load_config,
+    log_bootstrap_exception,
     normalize_source_ts,
     set_meta,
     setup_logging,
@@ -258,27 +260,36 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
-    config = load_config(args.config)
-    setup_logging(config["log_path"], name="roofobserver")
-    conn = init_db(config["db_path"])
-
-    logging.info("RoofObserver started")
     try:
-        while True:
-            try:
-                stats = run_poll_cycle(conn, config)
-                logging.info("poll cycle complete: %s", stats)
-            except Exception:
-                logging.exception("poll cycle error")
+        args = parse_args()
+        config = load_config(args.config)
+        setup_logging(config["log_path"], name="roofobserver")
+        conn = init_db(config["db_path"])
 
-            if args.once:
-                break
-            time.sleep(int(config["poll_interval_seconds"]))
-    finally:
-        conn.close()
+        logging.info("RoofObserver started")
+        try:
+            while True:
+                try:
+                    stats = run_poll_cycle(conn, config)
+                    logging.info("poll cycle complete: %s", stats)
+                except Exception:
+                    logging.exception("poll cycle error")
 
-    return 0
+                if args.once:
+                    break
+                time.sleep(int(config["poll_interval_seconds"]))
+        finally:
+            conn.close()
+
+        return 0
+    except Exception as exc:
+        bootstrap_path = log_bootstrap_exception("roofobserver", exc)
+        try:
+            logging.exception("RoofObserver fatal startup error")
+        except Exception:
+            pass
+        print(f"RoofObserver fatal startup error. See {bootstrap_path}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

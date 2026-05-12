@@ -373,9 +373,10 @@ if __name__ == "__main__":
 2. Wait for GitHub Actions to finish and publish `RoofObserverSetup.exe` to the GitHub Release.
 3. On the scope PC, download `RoofObserverSetup.exe` from the repo Releases page.
 4. Run the installer as Administrator.
-5. Edit `C:\RoofObserver\config.json` so `share_root` is the correct UNC path and verify `source_timezone`.
-6. Confirm both services are installed and started: `sc query RoofObserver` and `sc query RoofAPI`.
-7. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
+5. During install, browse to a real `RoofStatusFile.txt` from any building. The installer derives the correct UNC `share_root` automatically from that file path.
+6. Verify `source_timezone` in `config.json` if needed.
+7. Confirm both services are installed and started: `sc query RoofObserver` and `sc query RoofAPI`.
+8. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
   ```
   curl http://<tailscale-ip>:5000/
   curl http://<tailscale-ip>:5000/roofs/events?limit=10
@@ -460,10 +461,17 @@ jobs:
         with: { python-version: '3.11' }
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+        shell: pwsh
       - name: Install NSSM
         run: |
           choco install nssm --no-progress -y
-          $nssmPath = Join-Path $env:ChocolateyInstall 'bin\nssm.exe'
+          $packageRoot = Join-Path $env:ChocolateyInstall 'lib\nssm'
+          $nssmPath = Get-ChildItem $packageRoot -Recurse -Filter nssm.exe |
+            Where-Object { $_.FullName -notlike '*\bin\nssm.exe' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
           Copy-Item $nssmPath .\nssm.exe
         shell: pwsh
       - name: Update rolling edge tag
@@ -474,8 +482,8 @@ jobs:
         shell: bash
       - name: Build executables
         run: |
-          pyinstaller --onefile --name roofobserver roofobserver.py
-          pyinstaller --onefile --name roofapi roofapi.py
+          pyinstaller --onefile --collect-all tzdata --name roofobserver roofobserver.py
+          pyinstaller --onefile --collect-all tzdata --name roofapi roofapi.py
       - name: Build installer
         run: iscc installer.iss
       - name: Upload to GitHub Release
@@ -526,7 +534,7 @@ The helper script is optional now. Use it only when you want a numbered `v*` rel
 
 - To publish the latest dev build: push to `main`; GitHub Actions updates the rolling `edge` prerelease automatically.
 - To publish a numbered release: use `./release.sh` to create and push a new `v*` tag.
-- To change the share path: edit `share_root` in `config.json` at `C:\RoofObserver\` to the correct UNC path, restart only the poller (`nssm restart RoofObserver`).
+- To change the share path after install: edit `share_root` in `config.json` to the correct UNC path, restart only the poller (`nssm restart RoofObserver`).
 - To change the source timezone: edit `source_timezone` and restart the poller so future ingested rows normalize correctly.
 - To change the API port or bind address: edit `api_host`/`api_port` in `config.json`, restart the API service (`nssm restart RoofAPI`).
 - To add new buildings: no changes needed — discovery is dynamic.
@@ -550,4 +558,5 @@ The helper script is optional now. Use it only when you want a numbered `v*` rel
 - Local API validation completed against the generated SQLite DB using Flask's test client: `/`, `/roofs`, `/roofs/events`, and `/weather/latest` returned successful JSON responses.
 - Automatic CI release added: every push to `main` now builds the installer and updates a rolling prerelease tagged `edge`.
 - Release helper retained as optional tooling: `release.sh` creates and pushes a numbered `v*` tag when you want a formal versioned release.
+- Installer improvement added: first-time install now prompts for a real `RoofStatusFile.txt` and derives the correct UNC `share_root` automatically.
 - Remaining real-world deployment steps are Windows-specific: build the installer from GitHub Actions, install on the scope PC, set the final UNC `share_root`, and verify NSSM services plus network API access over Tailscale.

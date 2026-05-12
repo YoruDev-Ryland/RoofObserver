@@ -5,6 +5,7 @@ import logging
 import re
 import sqlite3
 import sys
+import traceback
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -108,6 +109,24 @@ def setup_logging(log_path: str | Path, *, name: str | None = None) -> None:
 
     if name:
         logging.getLogger(name).setLevel(logging.INFO)
+
+
+def bootstrap_log_path(service_name: str) -> Path:
+    return runtime_dir() / f"{service_name}-startup.log"
+
+
+def log_bootstrap_exception(service_name: str, exc: BaseException) -> Path:
+    path = bootstrap_log_path(service_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"{timestamp} fatal startup error in {service_name}",
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        "",
+    ]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return path
 
 
 def utc_now_text() -> str:
