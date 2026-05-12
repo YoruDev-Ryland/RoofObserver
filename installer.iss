@@ -53,12 +53,14 @@ end;
 
 function NormalizeSlashes(const Value: string): string;
 begin
-	Result := StringChangeEx(Value, '/', '\', True);
+	Result := Value;
+	StringChangeEx(Result, '/', '\', True);
 end;
 
 function JsonEscapeBackslashes(const Value: string): string;
 begin
-	Result := StringChangeEx(Value, '\', '\\', True);
+	Result := Value;
+	StringChangeEx(Result, '\', '\\', True);
 end;
 
 function DeriveShareRootFromRoofFile(const RoofFilePath: string; var ShareRoot: string): Boolean;
@@ -108,7 +110,7 @@ begin
 
 	EscapedShareRoot := JsonEscapeBackslashes(ShareRoot);
 	if Pos(ConfigShareRootPlaceholder, Contents) > 0 then
-		Contents := StringChangeEx(Contents, ConfigShareRootPlaceholder, EscapedShareRoot, True)
+		StringChangeEx(Contents, ConfigShareRootPlaceholder, EscapedShareRoot, True)
 	else
 		RaiseException('config.json no longer contains the expected share_root placeholder. Edit config.json manually.');
 
