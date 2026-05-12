@@ -46,10 +46,11 @@ main() {
 
   require_clean_tree
 
-  git fetch --tags origin
+  git fetch --prune origin main
+  git fetch --force origin 'refs/tags/v*:refs/tags/v*'
 
   local latest_tag
-  latest_tag="$(git tag --list 'v*' --sort=-creatordate | head -n 1 || true)"
+  latest_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
   if [[ -n "$latest_tag" ]]; then
     echo "Latest release tag: $latest_tag"
   else
