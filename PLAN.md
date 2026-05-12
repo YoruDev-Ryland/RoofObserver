@@ -386,7 +386,7 @@ if __name__ == "__main__":
 ### Step 6 — Manual install fallback (Python + NSSM)
 
 1. Clone the repo or copy the full source tree to `C:\RoofObserver\` so `roofobserver.py`, `roofapi.py`, `roofcommon.py`, `config.json`, and `requirements.txt` are all present.
-2. Download NSSM from https://nssm.cc/download — place `nssm.exe` in `C:\RoofObserver\`.
+2. Install NSSM on the telescope PC. Any reliable method is fine; `choco install nssm -y` is the simplest if Chocolatey is available.
 3. Run `python -m pip install -r requirements.txt` on the telescope PC if not already done.
 4. Open an elevated PowerShell prompt.
 5. Install the poller service:
@@ -429,33 +429,49 @@ if __name__ == "__main__":
 
 ### Step 7 — GitHub Actions: build and publish installer
 
-This step is done from the dev machine, not the scope PC. The workflow is already committed to the repo; it fires automatically when a version tag is pushed.
+This step is done from the dev machine, not the scope PC. The workflow is already committed to the repo; it now fires automatically on every push to `main`, on `v*` tag pushes, and by manual dispatch.
 
 **Files to create in the repo:**
 
-**`.github/workflows/build.yml`** — triggers on `v*` tag push:
+**`.github/workflows/build.yml`** — triggers on pushes to `main`, on `v*` tag pushes, and via manual dispatch:
 ```yaml
 name: Build Installer
 on:
   push:
+    branches: [main]
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build manually
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
   build:
     runs-on: windows-latest
     steps:
+      - name: Resolve release mode
+        # branch push -> rolling prerelease "edge"
+        # tag push / manual tag -> numbered release "v*"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - name: Install Python deps
         run: pip install -r requirements.txt pyinstaller
-      - name: Download NSSM
+      - name: Install NSSM
         run: |
-          Invoke-WebRequest -Uri https://nssm.cc/release/nssm-2.24.zip -OutFile nssm.zip
-          Expand-Archive nssm.zip -DestinationPath nssm_tmp
-          Copy-Item nssm_tmp\nssm-2.24\win64\nssm.exe .\nssm.exe
+          choco install nssm --no-progress -y
+          $nssmPath = Join-Path $env:ChocolateyInstall 'bin\nssm.exe'
+          Copy-Item $nssmPath .\nssm.exe
         shell: pwsh
+      - name: Update rolling edge tag
+        if: github.ref_type == 'branch'
+        run: |
+          git tag -f edge "$GITHUB_SHA"
+          git push origin refs/tags/edge --force
+        shell: bash
       - name: Build executables
         run: |
           pyinstaller --onefile --name roofobserver roofobserver.py
@@ -465,6 +481,9 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: edge-or-v-tag
+          prerelease: true-for-edge-false-for-v-tag
+          overwrite_files: true
           files: Output/RoofObserverSetup.exe
 ```
 
@@ -491,15 +510,22 @@ Source: "config.json";           DestDir: "{app}"; Flags: onlyifdoesntexist
 ; After file copy, reinstall services, set auto-restart, and start both.
 ```
 
-**To release a new version:**
+**Build on every push:**
+```bash
+git push origin main
+```
+Every push to `main` automatically builds the installer and updates a rolling prerelease tagged `edge`.
+
+**To create a numbered release:**
 ```bash
 ./release.sh
 ```
-The helper script prompts for the version tag, pushes the current branch, creates the annotated `v*` tag, and pushes it. Actions then build, create the GitHub Release, and attach `RoofObserverSetup.exe` automatically. Visit the repo Releases page on the scope PC and download the exe.
+The helper script is optional now. Use it only when you want a numbered `v*` release. For normal development builds, just push to `main` and the workflow updates the rolling `edge` prerelease automatically. In both cases, the installer is attached directly to the GitHub Release and no Actions artifacts are stored.
 
 ### Step 8 — Ongoing maintenance / future changes
 
-- To release an update: commit changes, push a new `v*` tag; GitHub Actions builds and publishes the installer automatically.
+- To publish the latest dev build: push to `main`; GitHub Actions updates the rolling `edge` prerelease automatically.
+- To publish a numbered release: use `./release.sh` to create and push a new `v*` tag.
 - To change the share path: edit `share_root` in `config.json` at `C:\RoofObserver\` to the correct UNC path, restart only the poller (`nssm restart RoofObserver`).
 - To change the source timezone: edit `source_timezone` and restart the poller so future ingested rows normalize correctly.
 - To change the API port or bind address: edit `api_host`/`api_port` in `config.json`, restart the API service (`nssm restart RoofAPI`).
@@ -522,5 +548,6 @@ The helper script prompts for the version tag, pushes the current branch, create
 - Implemented files: `roofcommon.py`, `roofobserver.py`, `roofapi.py`, and `requirements.txt`.
 - Local ingestion validation completed against the `SFROShare` snapshot: `roof_events=12`, `weather_snapshots=1`, `daily_weather=71` on the first one-shot poll.
 - Local API validation completed against the generated SQLite DB using Flask's test client: `/`, `/roofs`, `/roofs/events`, and `/weather/latest` returned successful JSON responses.
-- Release helper added: `release.sh` creates and pushes the `v*` tag so GitHub Actions can build and publish the installer without remembering the commands.
+- Automatic CI release added: every push to `main` now builds the installer and updates a rolling prerelease tagged `edge`.
+- Release helper retained as optional tooling: `release.sh` creates and pushes a numbered `v*` tag when you want a formal versioned release.
 - Remaining real-world deployment steps are Windows-specific: build the installer from GitHub Actions, install on the scope PC, set the final UNC `share_root`, and verify NSSM services plus network API access over Tailscale.
