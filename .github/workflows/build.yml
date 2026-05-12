@@ -4,17 +4,53 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and release (for example v1.0.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "Release tag must look like v1.0.0" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout requested tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git fetch --force --tags origin
+          git checkout "refs/tags/${{ steps.release.outputs.tag }}"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -23,6 +59,10 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt pyinstaller
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
       - name: Download NSSM
         shell: pwsh
@@ -42,4 +82,7 @@ jobs:
       - name: Upload installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
           files: Output/RoofObserverSetup.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true

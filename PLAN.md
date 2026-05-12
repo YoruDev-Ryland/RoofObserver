@@ -493,10 +493,9 @@ Source: "config.json";           DestDir: "{app}"; Flags: onlyifdoesntexist
 
 **To release a new version:**
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+./release.sh
 ```
-Actions will build, create the GitHub Release, and attach `RoofObserverSetup.exe` automatically. Visit the repo Releases page on the scope PC and download the exe.
+The helper script prompts for the version tag, pushes the current branch, creates the annotated `v*` tag, and pushes it. Actions then build, create the GitHub Release, and attach `RoofObserverSetup.exe` automatically. Visit the repo Releases page on the scope PC and download the exe.
 
 ### Step 8 — Ongoing maintenance / future changes
 
@@ -523,4 +522,5 @@ Actions will build, create the GitHub Release, and attach `RoofObserverSetup.exe
 - Implemented files: `roofcommon.py`, `roofobserver.py`, `roofapi.py`, and `requirements.txt`.
 - Local ingestion validation completed against the `SFROShare` snapshot: `roof_events=12`, `weather_snapshots=1`, `daily_weather=71` on the first one-shot poll.
 - Local API validation completed against the generated SQLite DB using Flask's test client: `/`, `/roofs`, `/roofs/events`, and `/weather/latest` returned successful JSON responses.
+- Release helper added: `release.sh` creates and pushes the `v*` tag so GitHub Actions can build and publish the installer without remembering the commands.
 - Remaining real-world deployment steps are Windows-specific: build the installer from GitHub Actions, install on the scope PC, set the final UNC `share_root`, and verify NSSM services plus network API access over Tailscale.
