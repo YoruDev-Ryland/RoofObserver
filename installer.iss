@@ -46,9 +46,12 @@ begin
 end;
 
 procedure AppendInstallerLog(const Message: string);
+var
+	LogLine: AnsiString;
 begin
 	Log(Message);
-	SaveStringToFile(InstallerServiceLogPath(), GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0) + ' ' + Message + #13#10, True);
+	LogLine := GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0) + ' ' + Message + #13#10;
+	SaveStringToFile(InstallerServiceLogPath(), LogLine, True);
 end;
 
 function NormalizeSlashes(const Value: string): string;
@@ -88,6 +91,7 @@ end;
 
 function ConfigHasPlaceholderOrMissing(): Boolean;
 var
+	RawContents: AnsiString;
 	Contents: string;
 begin
 	if not FileExists(InstalledConfigPath()) then
@@ -96,17 +100,25 @@ begin
 		exit;
 	end;
 
-	LoadStringFromFile(InstalledConfigPath(), Contents);
+	if not LoadStringFromFile(InstalledConfigPath(), RawContents) then
+	begin
+		Result := True;
+		exit;
+	end;
+
+	Contents := RawContents;
 	Result := Pos(ConfigShareRootPlaceholder, Contents) > 0;
 end;
 
 procedure UpdateInstalledConfigShareRoot(const ShareRoot: string);
 var
+	RawContents: AnsiString;
 	Contents: string;
 	EscapedShareRoot: string;
 begin
-	if not LoadStringFromFile(InstalledConfigPath(), Contents) then
+	if not LoadStringFromFile(InstalledConfigPath(), RawContents) then
 		RaiseException('Unable to read ' + InstalledConfigPath());
+	Contents := RawContents;
 
 	EscapedShareRoot := JsonEscapeBackslashes(ShareRoot);
 	if Pos(ConfigShareRootPlaceholder, Contents) > 0 then
@@ -114,7 +126,8 @@ begin
 	else
 		RaiseException('config.json no longer contains the expected share_root placeholder. Edit config.json manually.');
 
-	if not SaveStringToFile(InstalledConfigPath(), Contents, False) then
+	RawContents := Contents;
+	if not SaveStringToFile(InstalledConfigPath(), RawContents, False) then
 		RaiseException('Unable to write ' + InstalledConfigPath());
 
 	AppendInstallerLog('Configured share_root=' + ShareRoot);
