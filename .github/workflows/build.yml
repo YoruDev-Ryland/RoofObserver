@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install flask waitress pyinstaller
+        run: pip install -r requirements.txt pyinstaller
 
       - name: Download NSSM
         shell: pwsh

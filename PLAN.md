@@ -176,9 +176,11 @@ Key examples: `daily_txt_offset`, `weatherdata_last_line`.
 ### Repo (GitHub)
 ```
 RoofObserver/
+  roofcommon.py           ← shared config/db/logging helpers
     roofobserver.py          ← poller service script
     roofapi.py               ← API server script
     config.json              ← default config template
+  requirements.txt         ← runtime dependencies for local/dev runs
     installer.iss            ← Inno Setup script
     .github/
         workflows/
@@ -210,6 +212,8 @@ Each step is discrete and verifiable.
 3. Use the installer for real deployment on the scope PC. Keep direct Python execution only for local development and debugging.
 
 ### Step 2 — Write `roofobserver.py`
+
+The poller uses a small shared helper module, `roofcommon.py`, for config loading, SQLite schema setup, timestamp normalization, and logging. `roofobserver.py` stays focused on file polling and inserts.
 
 The script is a single file with these sections in order:
 
@@ -283,6 +287,8 @@ if __name__ == "__main__":
 ### Step 3 — Write `roofapi.py`
 
 A second single-file script. It opens SQLite in read-only mode per request and serves all data as JSON via Flask + Waitress.
+
+`roofapi.py` imports shared config/logging/path helpers from `roofcommon.py`.
 
 **3a. Imports**
 `flask`, `sqlite3`, `json`, `logging`, `pathlib`
@@ -379,10 +385,11 @@ if __name__ == "__main__":
 
 ### Step 6 — Manual install fallback (Python + NSSM)
 
-1. Download NSSM from https://nssm.cc/download — place `nssm.exe` in `C:\RoofObserver\`.
-2. Run `pip install flask waitress` on the telescope PC if not already done.
-3. Open an elevated PowerShell prompt.
-4. Install the poller service:
+1. Clone the repo or copy the full source tree to `C:\RoofObserver\` so `roofobserver.py`, `roofapi.py`, `roofcommon.py`, `config.json`, and `requirements.txt` are all present.
+2. Download NSSM from https://nssm.cc/download — place `nssm.exe` in `C:\RoofObserver\`.
+3. Run `python -m pip install -r requirements.txt` on the telescope PC if not already done.
+4. Open an elevated PowerShell prompt.
+5. Install the poller service:
   ```
   C:\RoofObserver\nssm.exe install RoofObserver "C:\Python311\python.exe" "C:\RoofObserver\roofobserver.py"
   C:\RoofObserver\nssm.exe set RoofObserver AppDirectory "C:\RoofObserver"
@@ -391,7 +398,7 @@ if __name__ == "__main__":
   C:\RoofObserver\nssm.exe set RoofObserver Start SERVICE_AUTO_START
   C:\RoofObserver\nssm.exe start RoofObserver
   ```
-5. Install the API service:
+6. Install the API service:
   ```
   C:\RoofObserver\nssm.exe install RoofAPI "C:\Python311\python.exe" "C:\RoofObserver\roofapi.py"
   C:\RoofObserver\nssm.exe set RoofAPI AppDirectory "C:\RoofObserver"
@@ -400,15 +407,15 @@ if __name__ == "__main__":
   C:\RoofObserver\nssm.exe set RoofAPI Start SERVICE_AUTO_START
   C:\RoofObserver\nssm.exe start RoofAPI
   ```
-6. Configure the services to restart after failures:
+7. Configure the services to restart after failures:
   ```
   C:\RoofObserver\nssm.exe set RoofObserver AppExit Default Restart
   C:\RoofObserver\nssm.exe set RoofObserver AppRestartDelay 5000
   C:\RoofObserver\nssm.exe set RoofAPI AppExit Default Restart
   C:\RoofObserver\nssm.exe set RoofAPI AppRestartDelay 5000
   ```
-7. Confirm both services: `sc query RoofObserver` and `sc query RoofAPI` — both should show `STATE: RUNNING`.
-8. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
+8. Confirm both services: `sc query RoofObserver` and `sc query RoofAPI` — both should show `STATE: RUNNING`.
+9. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
   ```
   curl http://<tailscale-ip>:5000/
   curl http://<tailscale-ip>:5000/roofs/events?limit=10
@@ -442,7 +449,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - name: Install Python deps
-        run: pip install flask waitress pyinstaller
+        run: pip install -r requirements.txt pyinstaller
       - name: Download NSSM
         run: |
           Invoke-WebRequest -Uri https://nssm.cc/release/nssm-2.24.zip -OutFile nssm.zip
@@ -508,3 +515,12 @@ Actions will build, create the GitHub Release, and attach `RoofObserverSetup.exe
 - No authentication on the API — Tailscale provides network-level access control; do not expose port 5000 to the public internet.
 - No data retention pruning — the DB will grow slowly (roof changes are infrequent; daily weather is ~144 rows/day).
 - No alerting or notifications.
+
+---
+
+## Current Implementation Status
+
+- Implemented files: `roofcommon.py`, `roofobserver.py`, `roofapi.py`, and `requirements.txt`.
+- Local ingestion validation completed against the `SFROShare` snapshot: `roof_events=12`, `weather_snapshots=1`, `daily_weather=71` on the first one-shot poll.
+- Local API validation completed against the generated SQLite DB using Flask's test client: `/`, `/roofs`, `/roofs/events`, and `/weather/latest` returned successful JSON responses.
+- Remaining real-world deployment steps are Windows-specific: build the installer from GitHub Actions, install on the scope PC, set the final UNC `share_root`, and verify NSSM services plus network API access over Tailscale.
