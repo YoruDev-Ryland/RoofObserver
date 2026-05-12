@@ -202,11 +202,23 @@ SCHEMA_STATEMENTS = [
         value TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS source_availability_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        logged_at TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        detail TEXT,
+        recovered_at TEXT
+    )
+    """,
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_ts ON daily_weather(source_record_ts)",
     "CREATE INDEX IF NOT EXISTS idx_roof_events_building_ts ON roof_events(building, source_ts_utc DESC)",
     "CREATE INDEX IF NOT EXISTS idx_roof_events_status_ts ON roof_events(status, source_ts_utc DESC)",
     "CREATE INDEX IF NOT EXISTS idx_weather_snapshots_ts ON weather_snapshots(source_ts_utc DESC)",
     "CREATE INDEX IF NOT EXISTS idx_daily_weather_ts ON daily_weather(source_ts_utc DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_source_availability_name_ts ON source_availability_events(source_name, logged_at DESC)",
 ]
 
 
@@ -237,6 +249,49 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         """,
         (key, value),
     )
+
+
+def update_source_availability(
+    conn: sqlite3.Connection,
+    *,
+    source_name: str,
+    path: str | Path,
+    is_available: bool,
+    detail: str | None = None,
+) -> None:
+    state_key = f"source_availability_{source_name}"
+    previous_state = get_meta(conn, state_key)
+    next_state = "available" if is_available else "unavailable"
+    path_text = str(path)
+
+    if previous_state == next_state:
+        return
+
+    now = utc_now_text()
+    conn.execute(
+        """
+        INSERT INTO source_availability_events(logged_at, source_name, path, status, detail, recovered_at)
+        VALUES(?, ?, ?, ?, ?, NULL)
+        """,
+        (now, source_name, path_text, next_state, detail),
+    )
+
+    if is_available:
+        conn.execute(
+            """
+            UPDATE source_availability_events
+            SET recovered_at = ?
+            WHERE id = (
+                SELECT id FROM source_availability_events
+                WHERE source_name = ? AND status = 'unavailable' AND recovered_at IS NULL
+                ORDER BY logged_at DESC, id DESC
+                LIMIT 1
+            )
+            """,
+            (now, source_name),
+        )
+
+    set_meta(conn, state_key, next_state)
 
 
 def sqlite_readonly_uri(db_path: str | Path) -> str:

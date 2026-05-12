@@ -18,6 +18,7 @@ from roofcommon import (
     normalize_source_ts,
     set_meta,
     setup_logging,
+    update_source_availability,
     utc_now_text,
 )
 
@@ -37,22 +38,70 @@ def parse_roof_file(text: str, source_timezone: str) -> dict[str, str] | None:
 
 
 def poll_roofs(conn: sqlite3.Connection, roof_dir: Path, source_timezone: str) -> int:
-    if not roof_dir.exists():
-        logging.warning("roof directory does not exist: %s", roof_dir)
-        return 0
+    try:
+        if not roof_dir.exists():
+            update_source_availability(
+                conn,
+                source_name="roof_dir",
+                path=roof_dir,
+                is_available=False,
+                detail="roof directory does not exist",
+            )
+            logging.warning("roof directory does not exist: %s", roof_dir)
+            return 0
+
+        building_dirs = sorted(path for path in roof_dir.iterdir() if path.is_dir())
+    except OSError as exc:
+        update_source_availability(
+            conn,
+            source_name="roof_dir",
+            path=roof_dir,
+            is_available=False,
+            detail=str(exc),
+        )
+        raise
+
+    update_source_availability(conn, source_name="roof_dir", path=roof_dir, is_available=True)
 
     inserted = 0
-    for building_dir in sorted(path for path in roof_dir.iterdir() if path.is_dir()):
+    for building_dir in building_dirs:
+        building = building_dir.name
         roof_file = building_dir / "RoofStatusFile.txt"
         if not roof_file.exists():
+            update_source_availability(
+                conn,
+                source_name=f"roof_file:{building}",
+                path=roof_file,
+                is_available=False,
+                detail="RoofStatusFile.txt does not exist",
+            )
             continue
 
-        payload = parse_roof_file(roof_file.read_text(encoding="utf-8", errors="replace"), source_timezone)
+        try:
+            roof_text = roof_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            update_source_availability(
+                conn,
+                source_name=f"roof_file:{building}",
+                path=roof_file,
+                is_available=False,
+                detail=str(exc),
+            )
+            logging.warning("could not read roof file %s: %s", roof_file, exc)
+            continue
+
+        update_source_availability(
+            conn,
+            source_name=f"roof_file:{building}",
+            path=roof_file,
+            is_available=True,
+        )
+
+        payload = parse_roof_file(roof_text, source_timezone)
         if payload is None:
             logging.warning("could not parse roof file: %s", roof_file)
             continue
 
-        building = building_dir.name
         last_status = get_meta(conn, f"roof_{building}_last")
         if last_status == payload["status"]:
             continue
@@ -104,11 +153,30 @@ def parse_weatherdata_line(line: str, source_timezone: str) -> dict[str, object]
 
 def poll_weatherdata(conn: sqlite3.Connection, weather_dir: Path, source_timezone: str) -> int:
     weather_file = weather_dir / "weatherdata.txt"
-    if not weather_file.exists():
-        logging.warning("weatherdata file does not exist: %s", weather_file)
-        return 0
+    try:
+        if not weather_file.exists():
+            update_source_availability(
+                conn,
+                source_name="weatherdata_file",
+                path=weather_file,
+                is_available=False,
+                detail="weatherdata file does not exist",
+            )
+            logging.warning("weatherdata file does not exist: %s", weather_file)
+            return 0
 
-    line = weather_file.read_text(encoding="utf-8", errors="replace").strip()
+        line = weather_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        update_source_availability(
+            conn,
+            source_name="weatherdata_file",
+            path=weather_file,
+            is_available=False,
+            detail=str(exc),
+        )
+        raise
+
+    update_source_availability(conn, source_name="weatherdata_file", path=weather_file, is_available=True)
     if not line:
         return 0
 
@@ -180,21 +248,40 @@ def parse_daily_block(block: str, source_timezone: str) -> dict[str, object] | N
 
 def poll_daily(conn: sqlite3.Connection, weather_dir: Path, source_timezone: str) -> int:
     daily_file = weather_dir / "daily.txt"
-    if not daily_file.exists():
-        logging.warning("daily file does not exist: %s", daily_file)
-        return 0
+    try:
+        if not daily_file.exists():
+            update_source_availability(
+                conn,
+                source_name="daily_file",
+                path=daily_file,
+                is_available=False,
+                detail="daily file does not exist",
+            )
+            logging.warning("daily file does not exist: %s", daily_file)
+            return 0
 
-    offset = int(get_meta(conn, "daily_txt_offset", "0") or "0")
-    remainder = get_meta(conn, "daily_txt_remainder", "") or ""
-    file_size = daily_file.stat().st_size
-    if file_size < offset:
-        offset = 0
-        remainder = ""
+        offset = int(get_meta(conn, "daily_txt_offset", "0") or "0")
+        remainder = get_meta(conn, "daily_txt_remainder", "") or ""
+        file_size = daily_file.stat().st_size
+        if file_size < offset:
+            offset = 0
+            remainder = ""
 
-    with daily_file.open("rb") as handle:
-        handle.seek(offset)
-        chunk = handle.read()
-        new_offset = handle.tell()
+        with daily_file.open("rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+            new_offset = handle.tell()
+    except OSError as exc:
+        update_source_availability(
+            conn,
+            source_name="daily_file",
+            path=daily_file,
+            is_available=False,
+            detail=str(exc),
+        )
+        raise
+
+    update_source_availability(conn, source_name="daily_file", path=daily_file, is_available=True)
 
     text = remainder + chunk.decode("utf-8", errors="replace")
     if not text:

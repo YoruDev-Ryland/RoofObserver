@@ -171,6 +171,50 @@ def create_app(config: dict[str, object]) -> Flask:
             }
         ), 200
 
+    @app.get("/sources/availability")
+    def source_availability() -> tuple[object, int]:
+        limit = parse_limit(default=100, maximum=1000)
+        source_name = request.args.get("source_name")
+        status = request.args.get("status")
+        since = request.args.get("since")
+
+        clauses: list[str] = []
+        params: list[object] = []
+        if source_name:
+            clauses.append("source_name = ?")
+            params.append(source_name)
+        if status:
+            clauses.append("status = ?")
+            params.append(status.lower())
+        if since:
+            clauses.append("logged_at >= ?")
+            params.append(since)
+
+        where_clause, params_tuple = build_where(clauses, params)
+        results = query(
+            db_path,
+            f"SELECT * FROM source_availability_events{where_clause} ORDER BY logged_at DESC, id DESC LIMIT ?",
+            params_tuple + (limit,),
+        )
+        return jsonify({"count": len(results), "results": results}), 200
+
+    @app.get("/sources/availability/latest")
+    def latest_source_availability() -> tuple[object, int]:
+        results = query(
+            db_path,
+            """
+            SELECT source_name, path, status, detail, logged_at, recovered_at
+            FROM source_availability_events
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM source_availability_events
+                GROUP BY source_name
+            )
+            ORDER BY source_name ASC
+            """,
+        )
+        return jsonify({"count": len(results), "results": results}), 200
+
     return app
 
 
