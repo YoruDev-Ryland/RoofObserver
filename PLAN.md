@@ -7,7 +7,7 @@ Two cooperating Python processes run as Windows services on a Windows 11 telesco
 1. **Poller** (`roofobserver.py`) — watches roof and weather files on the mapped network drive and writes changes to a local SQLite database.
 2. **API server** (`roofapi.py`) — a lightweight Flask REST API that serves all database tables as JSON, accessible to other machines on the Tailscale VPN.
 
-A GitHub Actions workflow builds both scripts into a single Windows installer exe (`RoofObserverSetup.exe`) on every version tag push. The installer is uploaded as a GitHub Release artifact so it can be downloaded from the repo page and run directly on the telescope PC.
+A GitHub Actions workflow builds both scripts into a single Windows installer exe (`RoofObserverSetup.exe`) on every version tag push. The installer is the primary deployment path. It is uploaded as a GitHub Release artifact so it can be downloaded from the repo page and run directly on the telescope PC.
 
 ---
 
@@ -60,7 +60,10 @@ Barometer:	28.52 in Hg
 | Installer | Inno Setup 6 | Creates a single-file `RoofObserverSetup.exe`; pre-installed on GitHub Actions `windows-latest` |
 | CI/CD | GitHub Actions | Builds and publishes the installer on every `v*` tag push |
 
-**Pip installs required** (run once on the telescope PC — OR skip entirely if using the installer):
+**Primary deployment**: download and run `RoofObserverSetup.exe` from the GitHub Releases page on the scope PC.
+**Fallback/dev deployment only**: install Python and run the scripts directly.
+
+**Pip installs required** (fallback/dev path only):
 ```
 pip install flask waitress
 ```
@@ -71,9 +74,10 @@ pip install flask waitress
 
 ```json
 {
-  "share_root": "Z:\\",
+  "share_root": "\\\\YOUR-SHARE-HOST\\SFROShare",
   "roof_subdir": "roof",
   "weather_subdir": "weather",
+  "source_timezone": "America/Chicago",
   "db_path": "C:\\RoofObserver\\roofobserver.db",
   "poll_interval_seconds": 30,
   "log_path": "C:\\RoofObserver\\roofobserver.log",
@@ -82,10 +86,12 @@ pip install flask waitress
 }
 ```
 
+- `share_root` should be a UNC path, not a mapped drive letter. Windows services should not depend on per-user drive mappings like `Z:`.
+- `source_timezone` is the observatory timezone used to normalize source timestamps into UTC for querying.
 - `api_host` `0.0.0.0` makes the API reachable on all interfaces including Tailscale. Change to `127.0.0.1` to restrict to localhost only.
 - `api_port` default is `5000`. Ensure Windows Firewall allows inbound TCP on this port (or rely on Tailscale's overlay which bypasses the host firewall for VPN peers).
 
-- `share_root` is the only field that needs to change if the drive letter or path changes.
+- `share_root` is the main field that needs to change if the network path changes.
 - Building directories under `roof_subdir` are discovered dynamically (any subdirectory containing `RoofStatusFile.txt`).
 
 ---
@@ -100,8 +106,9 @@ CREATE TABLE IF NOT EXISTS roof_events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     logged_at    TEXT NOT NULL,          -- ISO-8601 UTC timestamp when row was inserted
     building     TEXT NOT NULL,          -- e.g. "building-2"
-    file_ts      TEXT NOT NULL,          -- timestamp string parsed from the file
-    timezone     TEXT,                   -- e.g. "CST"
+    source_file_ts TEXT NOT NULL,      -- original timestamp string from the file
+    source_tz      TEXT,               -- e.g. "CST"
+    source_ts_utc  TEXT NOT NULL,      -- normalized ISO-8601 UTC timestamp used for API filters
     status       TEXT NOT NULL           -- "OPEN" or "CLOSED"
 );
 ```
@@ -113,7 +120,8 @@ Stores a row every time `weatherdata.txt` content changes.
 CREATE TABLE IF NOT EXISTS weather_snapshots (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     logged_at      TEXT NOT NULL,
-    file_ts        TEXT NOT NULL,        -- datetime from field 0+1 of the file
+    source_file_ts TEXT NOT NULL,      -- datetime from field 0+1 of the file
+    source_ts_utc  TEXT NOT NULL,      -- normalized ISO-8601 UTC timestamp used for API filters
     sky_temp_f     REAL,
     ambient_temp_f REAL,
     wind_speed     REAL,
@@ -136,7 +144,8 @@ Stores each parsed block from `daily.txt`. Tracks file byte offset to avoid re-i
 CREATE TABLE IF NOT EXISTS daily_weather (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     logged_at       TEXT NOT NULL,
-    record_ts       TEXT NOT NULL,       -- "Time:" field from the block
+    source_record_ts TEXT NOT NULL,    -- raw "Time:" field from the block
+    source_ts_utc    TEXT NOT NULL,    -- normalized ISO-8601 UTC timestamp used for API filters
     ambient_temp_f  REAL,
     sky_temp_f      REAL,
     dew_point_f     REAL,
@@ -196,54 +205,58 @@ C:\RoofObserver\
 Each step is discrete and verifiable.
 
 ### Step 1 — Project scaffold
-1. Create directory `C:\RoofObserver\` on the telescope PC.
-2. Create `config.json` with the fields shown above, setting paths appropriately.
-3. Verify Python 3.11+ is installed: `python --version`.
+1. Keep the repo on the dev machine; do not hand-copy scripts to the scope PC.
+2. Set `config.json` to the correct UNC share path and observatory timezone.
+3. Use the installer for real deployment on the scope PC. Keep direct Python execution only for local development and debugging.
 
 ### Step 2 — Write `roofobserver.py`
 
 The script is a single file with these sections in order:
 
-**2a. Imports and constants**  
+**2a. Imports and constants**
 `sqlite3`, `json`, `os`, `re`, `time`, `datetime`, `logging`, `pathlib`, `sys`
 
-**2b. `load_config(path)`**  
-Reads `config.json`. Resolves `share_root`, builds full paths for roof dir, weather dir, db, log. Returns a config dict.
+**2b. `load_config(path)`**
+Reads `config.json`. Resolves `share_root`, builds full paths for roof dir, weather dir, db, log. Validates that `share_root` is a UNC path. Returns a config dict.
 
-**2c. `init_db(db_path)`**  
-Opens SQLite connection, runs `CREATE TABLE IF NOT EXISTS` for all four tables, calls `conn.commit()`. Returns connection.
+**2c. `init_db(db_path)`**
+Opens SQLite connection, enables WAL mode, runs `CREATE TABLE IF NOT EXISTS` for all four tables, calls `conn.commit()`. Returns connection.
 
-**2d. `parse_roof_file(text)` → dict or None**  
+**2d. `normalize_source_ts(raw_ts, source_timezone)` → str**
+Parses each source timestamp format, attaches `source_timezone`, converts to UTC, and returns ISO-8601 UTC text. This is the timestamp used for API `since` filters.
+
+**2e. `parse_roof_file(text)` → dict or None**
 Regex: `r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[AP]M) (\w+) Roof Status: (\w+)'`  
-Returns `{file_ts, timezone, status}` or `None` if parse fails.
+Returns `{source_file_ts, source_tz, source_ts_utc, status}` or `None` if parse fails.
 
-**2e. `poll_roofs(conn, roof_dir)`**  
+**2f. `poll_roofs(conn, roof_dir)`**
 - Walk `roof_dir` for subdirectories that contain `RoofStatusFile.txt`.
 - For each building, read the file, parse it.
 - Check the last known status from `meta` table (`key = "roof_{building}_last"`).
 - If status changed (or no prior record), insert a row into `roof_events` and update `meta`.
 
-**2f. `parse_weatherdata_line(line)` → dict or None**  
+**2g. `parse_weatherdata_line(line)` → dict or None**
 Split on whitespace. Field indices (0-based):  
 `0=date, 1=time, 2=temp_units, 3=wind_units, 4=sky_temp, 5=ambient_temp, 6=sensor_temp, 7=wind_speed, 8=humidity, 9=dew_point, 10=rain_flag, 11=wet_flag, 12=cloud_cond, 13=wind_cond, 14=rain_cond, 15=day_cond`  
-Cast numeric fields to float/int. Return dict.
+Cast numeric fields to float/int. Also derive `source_file_ts` and `source_ts_utc`. Return dict.
 
-**2g. `poll_weatherdata(conn, weather_dir)`**  
+**2h. `poll_weatherdata(conn, weather_dir)`**
 - Read `weatherdata.txt` as a single stripped line.
 - Compare to `meta` key `weatherdata_last_line`.
 - If changed, parse and insert into `weather_snapshots`, update `meta`.
 
-**2h. `poll_daily(conn, weather_dir)`**  
+**2i. `poll_daily(conn, weather_dir)`**
 - Open `daily.txt` in binary mode; seek to `meta` key `daily_txt_offset` (default 0).
 - Read new bytes to EOF; update offset in `meta`.
 - Decode and split on `_______________________`.
 - For each non-empty block, parse labeled fields using `str.splitlines()` and `str.split(':',1)` stripping.
 - Extract numeric values with regex `r'[\d.]+' ` from value strings.
-- Insert into `daily_weather` if `record_ts` not already present (use `INSERT OR IGNORE` with a UNIQUE index on `record_ts`).
+- Normalize the `Time:` field into `source_ts_utc`.
+- Insert into `daily_weather` if `source_record_ts` not already present (use `INSERT OR IGNORE` with a UNIQUE index on `source_record_ts`).
 
-> Add `CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_ts ON daily_weather(record_ts);` to `init_db`.
+> Add `CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_ts ON daily_weather(source_record_ts);` to `init_db`.
 
-**2i. `main()`**  
+**2j. `main()`**
 ```python
 config = load_config("config.json")
 setup_logging(config["log_path"])   # rotating file + stdout
@@ -261,7 +274,7 @@ while True:
     time.sleep(interval)
 ```
 
-**2j. Entry point**  
+**2k. Entry point**
 ```python
 if __name__ == "__main__":
     main()
@@ -269,22 +282,22 @@ if __name__ == "__main__":
 
 ### Step 3 — Write `roofapi.py`
 
-A second single-file script. It opens the database read-only and serves all data as JSON via Flask + Waitress.
+A second single-file script. It opens SQLite in read-only mode per request and serves all data as JSON via Flask + Waitress.
 
-**3a. Imports**  
+**3a. Imports**
 `flask`, `sqlite3`, `json`, `logging`, `pathlib`
 
-**3b. `load_config(path)`**  
+**3b. `load_config(path)`**
 Same helper as in `roofobserver.py` (copy it). Reads `config.json`.
 
-**3c. Flask app setup**  
+**3c. Flask app setup**
 ```python
 app = Flask(__name__)
 ```
-Open the database in read-only mode using the URI: `sqlite:///path/to/db?mode=ro` (via `uri=True` in `sqlite3.connect`). Store the connection at module level.
+Use a helper that opens the database in read-only mode using `file:path/to/db?mode=ro` with `uri=True`. Do not keep a module-level shared SQLite connection.
 
-**3d. Helper `query(sql, params=())`**  
-Executes a query and returns a list of dicts using `cursor.description` to map column names.
+**3d. Helpers `get_db()` and `query(sql, params=())`**
+`get_db()` opens a fresh read-only SQLite connection per request. `query()` executes a query, returns a list of dicts using `cursor.description`, and closes the connection immediately after use.
 
 **3e. Endpoints**
 
@@ -292,14 +305,14 @@ Executes a query and returns a list of dicts using `cursor.description` to map c
 |---|---|---|
 | `GET` | `/` | Health check — returns `{"status": "ok", "db": "<path>"}` |
 | `GET` | `/roofs` | List all distinct building names in `roof_events` |
-| `GET` | `/roofs/events` | All roof events. Query params: `building`, `status`, `since` (ISO timestamp), `limit` (default 500) |
+| `GET` | `/roofs/events` | All roof events. Query params: `building`, `status`, `since` (UTC ISO timestamp against `source_ts_utc`), `limit` (default 500) |
 | `GET` | `/roofs/events/<building>` | Events for one building. Same query params as above minus `building` |
 | `GET` | `/weather/snapshots` | Rows from `weather_snapshots`. Query params: `since`, `limit` (default 500) |
 | `GET` | `/weather/daily` | Rows from `daily_weather`. Query params: `since`, `limit` (default 500) |
 | `GET` | `/weather/latest` | Single most recent row from both `weather_snapshots` and `daily_weather` combined into one JSON object |
 
-All list endpoints return `{"count": N, "results": [...]}`.  
-All timestamps in responses are the raw strings stored in the DB.  
+All list endpoints return `{"count": N, "results": [...]}`.
+Responses should include both the raw source timestamp fields and `source_ts_utc`.
 All endpoints return `Content-Type: application/json`.
 
 **3f. Query param handling pattern (for each list endpoint)**  
@@ -310,7 +323,7 @@ limit    = int(request.args.get("limit", 500))
 
 where, params = [], []
 if building: where.append("building = ?");  params.append(building)
-if since:    where.append("logged_at >= ?"); params.append(since)
+if since:    where.append("source_ts_utc >= ?"); params.append(since)
 clause = ("WHERE " + " AND ".join(where)) if where else ""
 params.append(limit)
 rows = query(f"SELECT * FROM roof_events {clause} ORDER BY logged_at DESC LIMIT ?", params)
@@ -338,46 +351,76 @@ if __name__ == "__main__":
 3. Run `python roofapi.py` in a second terminal — confirm it starts and logs the bind address.
 4. Use `sqlite3 roofobserver.db "SELECT * FROM roof_events LIMIT 10;"` to verify DB rows.
 5. Hit `http://localhost:5000/` — should return `{"status": "ok"}`.
-6. Hit `http://localhost:5000/roofs/events` — should return roof event rows as JSON.
+6. Hit `http://localhost:5000/roofs/events` — should return roof event rows as JSON including `source_ts_utc`.
 7. Hit `http://localhost:5000/weather/latest` — should return the latest weather snapshot.
-8. Change a `RoofStatusFile.txt` manually; confirm a new row appears in `/roofs/events` within one poll interval.
-9. Append a new block to `daily.txt`; confirm it appears in `/weather/daily` without duplicates.
+8. Call `/roofs/events?since=<utc-iso-ts>` and confirm filtering works correctly.
+9. Change a `RoofStatusFile.txt` manually; confirm a new row appears in `/roofs/events` within one poll interval.
+10. Append a new block to `daily.txt`; confirm it appears in `/weather/daily` without duplicates.
 
-### Step 5 — Install both scripts as Windows services with NSSM
+### Step 5 — Install on the scope PC via the installer (primary path)
+
+1. On the dev machine, push a version tag:
+  ```
+  git tag v1.0.0
+  git push origin v1.0.0
+  ```
+2. Wait for GitHub Actions to finish and publish `RoofObserverSetup.exe` to the GitHub Release.
+3. On the scope PC, download `RoofObserverSetup.exe` from the repo Releases page.
+4. Run the installer as Administrator.
+5. Edit `C:\RoofObserver\config.json` so `share_root` is the correct UNC path and verify `source_timezone`.
+6. Confirm both services are installed and started: `sc query RoofObserver` and `sc query RoofAPI`.
+7. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
+  ```
+  curl http://<tailscale-ip>:5000/
+  curl http://<tailscale-ip>:5000/roofs/events?limit=10
+  ```
+
+> The installer stops and recreates both services during upgrades so exe replacements are reliable and upgrades stay idempotent.
+
+### Step 6 — Manual install fallback (Python + NSSM)
 
 1. Download NSSM from https://nssm.cc/download — place `nssm.exe` in `C:\RoofObserver\`.
 2. Run `pip install flask waitress` on the telescope PC if not already done.
 3. Open an elevated PowerShell prompt.
 4. Install the poller service:
-   ```
-   C:\RoofObserver\nssm.exe install RoofObserver "C:\Python311\python.exe" "C:\RoofObserver\roofobserver.py"
-   C:\RoofObserver\nssm.exe set RoofObserver AppDirectory "C:\RoofObserver"
-   C:\RoofObserver\nssm.exe set RoofObserver AppStdout "C:\RoofObserver\roofobserver.log"
-   C:\RoofObserver\nssm.exe set RoofObserver AppStderr "C:\RoofObserver\roofobserver.log"
-   C:\RoofObserver\nssm.exe set RoofObserver Start SERVICE_AUTO_START
-   C:\RoofObserver\nssm.exe start RoofObserver
-   ```
+  ```
+  C:\RoofObserver\nssm.exe install RoofObserver "C:\Python311\python.exe" "C:\RoofObserver\roofobserver.py"
+  C:\RoofObserver\nssm.exe set RoofObserver AppDirectory "C:\RoofObserver"
+  C:\RoofObserver\nssm.exe set RoofObserver AppStdout "C:\RoofObserver\roofobserver.log"
+  C:\RoofObserver\nssm.exe set RoofObserver AppStderr "C:\RoofObserver\roofobserver.log"
+  C:\RoofObserver\nssm.exe set RoofObserver Start SERVICE_AUTO_START
+  C:\RoofObserver\nssm.exe start RoofObserver
+  ```
 5. Install the API service:
-   ```
-   C:\RoofObserver\nssm.exe install RoofAPI "C:\Python311\python.exe" "C:\RoofObserver\roofapi.py"
-   C:\RoofObserver\nssm.exe set RoofAPI AppDirectory "C:\RoofObserver"
-   C:\RoofObserver\nssm.exe set RoofAPI AppStdout "C:\RoofObserver\roofapi.log"
-   C:\RoofObserver\nssm.exe set RoofAPI AppStderr "C:\RoofObserver\roofapi.log"
-   C:\RoofObserver\nssm.exe set RoofAPI Start SERVICE_AUTO_START
-   C:\RoofObserver\nssm.exe start RoofAPI
-   ```
-6. Confirm both services: `sc query RoofObserver` and `sc query RoofAPI` — both should show `STATE: RUNNING`.
-7. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
-   ```
-   curl http://<tailscale-ip>:5000/
-   curl http://<tailscale-ip>:5000/roofs/events?limit=10
-   ```
+  ```
+  C:\RoofObserver\nssm.exe install RoofAPI "C:\Python311\python.exe" "C:\RoofObserver\roofapi.py"
+  C:\RoofObserver\nssm.exe set RoofAPI AppDirectory "C:\RoofObserver"
+  C:\RoofObserver\nssm.exe set RoofAPI AppStdout "C:\RoofObserver\roofapi.log"
+  C:\RoofObserver\nssm.exe set RoofAPI AppStderr "C:\RoofObserver\roofapi.log"
+  C:\RoofObserver\nssm.exe set RoofAPI Start SERVICE_AUTO_START
+  C:\RoofObserver\nssm.exe start RoofAPI
+  ```
+6. Configure the services to restart after failures:
+  ```
+  C:\RoofObserver\nssm.exe set RoofObserver AppExit Default Restart
+  C:\RoofObserver\nssm.exe set RoofObserver AppRestartDelay 5000
+  C:\RoofObserver\nssm.exe set RoofAPI AppExit Default Restart
+  C:\RoofObserver\nssm.exe set RoofAPI AppRestartDelay 5000
+  ```
+7. Confirm both services: `sc query RoofObserver` and `sc query RoofAPI` — both should show `STATE: RUNNING`.
+8. From another machine on the Tailscale network, curl the Tailscale IP of the telescope PC:
+  ```
+  curl http://<tailscale-ip>:5000/
+  curl http://<tailscale-ip>:5000/roofs/events?limit=10
+  ```
 
-> **Network drive caveat**: If the Z: drive is not mapped at Windows service startup time, the poller will log an error and retry on the next poll cycle — no crash. Ensure the drive mapping is persistent (mapped with "Reconnect at sign-in" or via `net use` in a startup script). The API service is unaffected by the drive state.
+> **Network path requirement**: Use a UNC path in `share_root`. Do not rely on a mapped drive letter like `Z:` for the service account.
+
+> **Service account**: If the network share requires authentication, run the services under a Windows account that has permission to the UNC share.
 
 > **Windows Firewall**: Tailscale traffic typically bypasses the Windows Firewall for VPN peers. If access from the web server is blocked, add an inbound rule: `netsh advfirewall firewall add rule name="RoofAPI" dir=in action=allow protocol=TCP localport=5000`.
 
-### Step 6 — GitHub Actions: build and publish installer
+### Step 7 — GitHub Actions: build and publish installer
 
 This step is done from the dev machine, not the scope PC. The workflow is already committed to the repo; it fires automatically when a version tag is pushed.
 
@@ -389,6 +432,8 @@ name: Build Installer
 on:
   push:
     tags: ['v*']
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -426,6 +471,7 @@ OutputDir=Output
 OutputBaseFilename=RoofObserverSetup
 Compression=lzma
 SolidCompression=yes
+PrivilegesRequired=admin
 
 [Files]
 Source: "dist\roofobserver.exe"; DestDir: "{app}"
@@ -433,15 +479,9 @@ Source: "dist\roofapi.exe";     DestDir: "{app}"
 Source: "nssm.exe";              DestDir: "{app}"
 Source: "config.json";           DestDir: "{app}"; Flags: onlyifdoesntexist
 
-[Run]
-Filename: "{app}\nssm.exe"; Parameters: "install RoofObserver \"{app}\roofobserver.exe\""; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "set RoofObserver AppDirectory \"{app}\""; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "set RoofObserver Start SERVICE_AUTO_START"; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "install RoofAPI \"{app}\roofapi.exe\""; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "set RoofAPI AppDirectory \"{app}\""; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "set RoofAPI Start SERVICE_AUTO_START"; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "start RoofObserver"; Flags: runhidden
-Filename: "{app}\nssm.exe"; Parameters: "start RoofAPI"; Flags: runhidden
+[Code]
+; Before file replacement, stop and remove existing services if present.
+; After file copy, reinstall services, set auto-restart, and start both.
 ```
 
 **To release a new version:**
@@ -451,10 +491,11 @@ git push origin v1.0.0
 ```
 Actions will build, create the GitHub Release, and attach `RoofObserverSetup.exe` automatically. Visit the repo Releases page on the scope PC and download the exe.
 
-### Step 7 — Ongoing maintenance / future changes
+### Step 8 — Ongoing maintenance / future changes
 
 - To release an update: commit changes, push a new `v*` tag; GitHub Actions builds and publishes the installer automatically.
-- To change the share path: edit `share_root` in `config.json` at `C:\RoofObserver\`, restart only the poller (`nssm restart RoofObserver`).
+- To change the share path: edit `share_root` in `config.json` at `C:\RoofObserver\` to the correct UNC path, restart only the poller (`nssm restart RoofObserver`).
+- To change the source timezone: edit `source_timezone` and restart the poller so future ingested rows normalize correctly.
 - To change the API port or bind address: edit `api_host`/`api_port` in `config.json`, restart the API service (`nssm restart RoofAPI`).
 - To add new buildings: no changes needed — discovery is dynamic.
 - To query data directly: any SQLite browser (e.g., DB Browser for SQLite) or the `sqlite3` CLI.

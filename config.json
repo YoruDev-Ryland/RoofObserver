@@ -1,7 +1,8 @@
 {
-  "share_root": "Z:\\",
+  "share_root": "\\\\YOUR-SHARE-HOST\\SFROShare",
   "roof_subdir": "roof",
   "weather_subdir": "weather",
+  "source_timezone": "America/Chicago",
   "db_path": "C:\\RoofObserver\\roofobserver.db",
   "poll_interval_seconds": 30,
   "log_path": "C:\\RoofObserver\\roofobserver.log",
