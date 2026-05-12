@@ -95,11 +95,16 @@ jobs:
         shell: pwsh
         run: |
           choco install nssm --no-progress -y
-          $nssmPath = Join-Path $env:ChocolateyInstall 'bin\nssm.exe'
-          if (-not (Test-Path $nssmPath)) {
-            throw "nssm.exe was not installed by Chocolatey"
+          $packageRoot = Join-Path $env:ChocolateyInstall 'lib\nssm'
+          $nssmPath = Get-ChildItem $packageRoot -Recurse -Filter nssm.exe |
+            Where-Object { $_.FullName -notlike '*\bin\nssm.exe' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $nssmPath) {
+            throw "real nssm.exe was not found under $packageRoot"
           }
-          Copy-Item $nssmPath .\nssm.exe
+          Write-Host "Using NSSM binary at $nssmPath"
+          Copy-Item $nssmPath .\nssm.exe -Force
 
       - name: Build executables with PyInstaller
         run: |
